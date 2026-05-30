@@ -4,8 +4,8 @@
 
 # 将顺序敏感性视为不确定性：面向 LLM-as-a-Judge 位置偏置的冲突感知分析
 
-**Zhibin Liu**  
-`benji94.liu@gmail.com`
+**Zhibin Liu**, **Yunbo Ye**  
+`benji94.liu@gmail.com`, `488059718@qq.com`
 
 ---
 
