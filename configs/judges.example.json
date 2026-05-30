@@ -1,0 +1,18 @@
+{
+    "judges": [
+        {
+            "name": "deepseek-v4-flash",
+            "provider": "DeepSeek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "api_key_env": "DEEPSEEK_API_KEY"
+        },
+        {
+            "name": "qwen",
+            "provider": "Qwen",
+            "model": "TODO_QWEN_MODEL",
+            "base_url": "TODO_QWEN_BASE_URL",
+            "api_key_env": "QWEN_API_KEY"
+        }
+    ]
+}
