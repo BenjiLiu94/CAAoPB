@@ -2,6 +2,8 @@
 
 > A Conflict-Aware Analysis of Position Bias in LLM-as-a-Judge
 
+[![GitHub](https://img.shields.io/badge/GitHub-BenjiLiu94/CAAoPB-blue?logo=github)](https://github.com/BenjiLiu94/CAAoPB)
+
 This repository contains the code and experiments for analyzing **position bias** in LLM-based pairwise evaluators. Rather than simply averaging scores across AB/BA orderings, we treat order disagreement as an **uncertainty signal** and study how conflict-aware aggregation affects the reliability of judged outcomes.
 
 ## Core Idea
