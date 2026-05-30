@@ -1,0 +1,250 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{Order Sensitivity as Uncertainty: A Conflict-Aware Analysis of Position Bias in LLM-as-a-Judge}
+\author{Zhibin Liu\\\texttt{benji94.liu@gamil.com}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+LLM-as-a-Judge has emerged as a scalable protocol for evaluating open-ended model responses, yet pairwise judging [can be highly sensitive] to the order in which candidate answers are presented. Existing position-balancing methods, such as evaluating both AB and BA orders and averaging scores, can reduce order imbalance at the aggregate level, but may [mask contradictions at the level of individual examples]. This paper studies whether order disagreement itself should be treated as an uncertainty signal. Using the official FairEval setting with ChatGPT and Vicuna-13B responses, we evaluate two black-box judges, DeepSeek v4 flash and Qwen3.6-35B-A3B. Both judges show substantial AB/BA flip rates and position-dependent behavior, although the direction of the position effect differs across orders. FairEval-style score averaging does not consistently improve human agreement. In contrast, conflict-aware aggregation, which abstains when AB and BA imply different real winners, improves accuracy on accepted samples at the cost of lower coverage. Requiring two judges to agree further improves accepted-set accuracy from 0.695 to 0.762, while reducing coverage from 0.738 to 0.525. These results suggest that AB/BA comparison is not only a calibration mechanism, but also a practical detector of unreliable judgments.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models (LLMs) are increasingly explored as automatic evaluators for open-ended generation tasks. In the LLM-as-a-Judge paradigm, a judge model is given a user question and one or more candidate answers, [and is then asked] to score or compare the answer quality. Pairwise comparison is especially common in this line of work because it avoids defining an absolute score scale and directly estimates model preferences \cite{zheng2023judging,liu2023geval}.
+
+However, pairwise judging introduces a basic reliability concern: the same two answers may receive different judgments when their presentation order is swapped. Ideally, if answer $X$ is preferred to answer $Y$ under the order $(X,Y)$, then $X$ should also be preferred under the order $(Y,X)$. Prior work has shown that this invariance often fails, [giving rise to] position bias in LLM-based evaluation.
+
+A common mitigation is to evaluate both answer orders, AB and BA, then aggregate the scores after mapping them back to the original candidate identities. This strategy, often called balanced position calibration (BPC), is simple and important \cite{wang2024faireval}. Yet score averaging may conceal a different problem: if AB says that candidate $X$ wins while BA says that candidate $Y$ wins, the pair is not merely noisy; it is presentation-sensitive. Treating such a pair as a normal win/loss example can [overstate the evidence behind] model-level conclusions.
+
+This paper asks a narrower question: can AB/BA disagreement be used as an uncertainty signal for LLM-as-a-Judge? Rather than claiming to eliminate position bias inside the judge model, we evaluate whether conflict-aware aggregation can [make unstable judgments explicit and reduce their influence] on final conclusions.
+
+Our contributions are:
+\begin{itemize}
+    \item We reproduce substantial order sensitivity on FairEval using two black-box judges, DeepSeek v4 flash and Qwen3.6-35B-A3B.
+    \item We compare naive fixed-order judging, FairEval-style BPC, and conflict-aware AB/BA aggregation.
+    \item We show that conflict-aware aggregation improves accepted-set human agreement, [with an explicit cost in] coverage.
+    \item We further evaluate two-judge agreement routing and find that requiring both judges to agree yields higher reliability on accepted samples.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{LLM-as-a-Judge.}
+LLM-as-a-Judge has been proposed as a scalable approach for evaluating open-ended responses. In MT-Bench and Chatbot Arena, Zheng et al. report that strong judges such as GPT-4 achieve over 80\% agreement with human preferences, close to the level of agreement among human annotators, while also documenting systematic biases such as position bias, verbosity bias, and self-enhancement bias \cite{zheng2023judging}. G-Eval similarly uses LLMs with explicit evaluation criteria to score generated text and reports stronger alignment with human judgments than earlier automatic metrics in several NLG settings \cite{liu2023geval}.
+
+\paragraph{Position Bias and FairEval.}
+FairEval systematically studied fairness issues in LLM evaluators and showed that changing the order of candidate answers can alter rankings. It proposed multiple evidence calibration (MEC), balanced position calibration (BPC), and human-in-the-loop calibration \cite{wang2024faireval}. Our work follows the FairEval setup and focuses specifically on [the interpretation of] AB/BA conflicts.
+
+\paragraph{Uncertainty in Evaluation.}
+Abstention and uncertainty estimation are important in model evaluation, especially when automatic labels are noisy. Selective classification formalizes this idea as a risk--coverage tradeoff, where a system can abstain on uncertain examples to improve reliability on accepted predictions \cite{geifman2017selective}. In this work, we treat presentation disagreement as a form of evaluation uncertainty. This differs from methods that [seek to produce] a single calibrated winner for every pair.
+
+\section{Problem Setup}
+
+Each example consists of a question $q$, a ChatGPT answer $a_C$, a Vicuna-13B answer $a_V$, and a human preference label $y \in \{\text{ChatGPT}, \text{Vicuna}, \text{Tie}\}$. A pairwise judge is queried under two orders:
+\[
+\text{AB}: (a_C, a_V), \qquad
+\text{BA}: (a_V, a_C).
+\]
+
+The judge outputs scores for the first and second answer. We map each order-specific score or winner back to the true candidate identity. A stable content-based judge should prefer the same true candidate under both AB and BA.
+
+\section{Methods}
+
+\subsection{Naive Pairwise Judge}
+
+The naive baseline evaluates only the AB order, where ChatGPT is shown first and Vicuna-13B second. The winner is determined by comparing the two scores. This baseline is vulnerable to first-position preference because candidate identity and answer position are [fully] confounded.
+
+\subsection{FairEval-Style BPC}
+
+Balanced position calibration evaluates both AB and BA. Let $s_C^{AB}$ and $s_V^{AB}$ be the mapped scores under AB, and $s_C^{BA}$ and $s_V^{BA}$ be the mapped scores under BA. FairEval-style BPC averages:
+\[
+\bar{s}_C = \frac{s_C^{AB} + s_C^{BA}}{2}, \qquad
+\bar{s}_V = \frac{s_V^{AB} + s_V^{BA}}{2}.
+\]
+The candidate with the higher averaged score wins; equal scores produce a tie.
+
+\subsection{Conflict-Aware AB/BA}
+
+We define a stricter aggregation rule based on winner consistency:
+\[
+g(w_{AB}, w_{BA}) =
+\begin{cases}
+w_{AB}, & \text{if } w_{AB}=w_{BA},\\
+\text{Uncertain}, & \text{otherwise.}
+\end{cases}
+\]
+where $w_{AB}$ and $w_{BA}$ are real-candidate winners after mapping each order back to ChatGPT, Vicuna-13B, or Tie. This rule treats order disagreement as an uncertainty signal [rather than averaging it away].
+
+\subsection{Two-Judge Agreement Routing}
+
+We also test a stricter reliability route using two judges. A final winner is accepted only when both judges produce the same non-uncertain winner under conflict-aware AB/BA. Otherwise, the sample is marked uncertain. This analysis tests whether cross-judge agreement provides a higher-confidence subset.
+
+\section{Experimental Setup}
+
+\paragraph{Dataset.}
+We use the official FairEval data for ChatGPT versus Vicuna-13B \cite{wang2024faireval,chiang2023vicuna}. The dataset contains 80 questions, corresponding candidate answers, and human preference labels. The label distribution is 41 ChatGPT wins, 25 Vicuna-13B wins, and 14 ties.
+
+\paragraph{Judges.}
+We use two black-box OpenAI-compatible judge APIs:
+\begin{itemize}
+    \item DeepSeek v4 flash, mapped to the provider's chat model.
+    \item Qwen3.6-35B-A3B with thinking disabled, because the provider otherwise returns reasoning content without final answer content.
+\end{itemize}
+
+\paragraph{Prompt and Decoding.}
+We follow the FairEval-style prompt: the judge is asked to provide evaluation evidence and then output two score lines, one for each assistant. The default experiments use temperature 1.0. For Qwen3.6, we set \texttt{enable\_thinking=false} to obtain standard answer content.
+
+\paragraph{Metrics.}
+We report:
+\begin{itemize}
+    \item \textbf{First-position win rate}: fraction of non-tie AB judgments where the first answer wins.
+    \item \textbf{Position flip rate}: fraction of examples where AB and BA imply different real winners.
+    \item \textbf{Human agreement}: accuracy against FairEval human labels.
+    \item \textbf{Coverage}: fraction of samples not marked uncertain.
+    \item \textbf{Permutation-test p-value}: two-sided paired sign-flip test over model-level wins.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Position Sensitivity Appears Across Judges}
+
+Table~\ref{tab:position} shows that both judges are sensitive to presentation order, but the direction of the position effect is not identical across orders. In the AB order, DeepSeek selects the first answer in 66.7\% of non-tie judgments, and Qwen3.6 does so in 77.3\%. In the BA order, DeepSeek is only weakly first-position leaning, while Qwen3.6 selects the second position more often. Across both orders combined, both judges select the first position in 60.0\% of non-tie judgments. [More importantly,] swapping answer order changes the real winner for 22.5\% and 28.7\% of examples, respectively.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Judge & AB first win & BA first win & Combined first win & Position flip \\
+\midrule
+DeepSeek v4 flash & 0.667 & 0.532 & 0.600 & 0.225 \\
+Qwen3.6-35B-A3B & 0.773 & 0.427 & 0.600 & 0.287 \\
+\bottomrule
+\end{tabular}
+\caption{Position sensitivity under FairEval AB/BA judging.}
+\label{tab:position}
+\end{table}
+
+This confirms that fixed-order judging mixes candidate quality with presentation position. Since ChatGPT is always first in the naive AB setup, naive ChatGPT win rates may be inflated by the AB-order position effect.
+
+\subsection{BPC Does Not Consistently Improve Human Agreement}
+
+Table~\ref{tab:agreement} compares human agreement. FairEval-style BPC does not consistently improve sample-level accuracy. For DeepSeek, BPC accuracy drops from 0.637 to 0.613. For Qwen3.6, BPC slightly improves from 0.550 to 0.562. This suggests that score averaging [may control presentation order at an aggregate level without necessarily producing] more reliable sample-level labels.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Judge & Naive acc. & BPC acc. & Conflict-aware acc. & Conflict-aware coverage \\
+\midrule
+DeepSeek v4 flash & 0.637 & 0.613 & 0.661 & 0.775 \\
+Qwen3.6-35B-A3B & 0.550 & 0.562 & 0.632 & 0.713 \\
+\bottomrule
+\end{tabular}
+\caption{Human agreement and coverage. Conflict-aware accuracy is computed only on accepted non-uncertain samples.}
+\label{tab:agreement}
+\end{table}
+
+\subsection{Conflict-Aware Aggregation Improves Accepted-Set Reliability}
+
+Conflict-aware AB/BA improves accuracy on accepted samples for both judges. DeepSeek improves from 0.637 naive accuracy to 0.661 accepted-set accuracy, with 77.5\% coverage. Qwen3.6 improves from 0.550 to 0.632, with 71.3\% coverage. This is not a free accuracy gain: it is a precision--coverage tradeoff. The method [increases reliability by declining to force decisions] on order-sensitive examples.
+
+Uncertain samples are genuinely harder for the naive judge. For Qwen3.6, naive accuracy on uncertain samples is only 0.348, compared with 0.632 on accepted samples. For DeepSeek, naive accuracy is 0.556 on uncertain samples and 0.661 on accepted samples. Thus, AB/BA disagreement [carries useful information rather than merely adding noise].
+
+\subsection{Model-Level Conclusions Change Under Conflict Handling}
+
+Table~\ref{tab:modellevel} reports model-level counts and permutation-test p-values. Naive AB gives highly significant ChatGPT-favored conclusions for both judges. After conflict-aware aggregation, DeepSeek no longer supports a significant winner ($p=0.2624$), while Qwen3.6 still favors ChatGPT ($p=0.0003$). This shows that conclusions after conflict handling [can remain sensitive to the choice of judge].
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llrrrrr}
+\toprule
+Judge & Method & ChatGPT & Vicuna & Tie & Uncertain & $p$-value \\
+\midrule
+DeepSeek & Naive & 52 & 26 & 2 & 0 & 0.0047 \\
+DeepSeek & BPC & 44 & 31 & 5 & 0 & 0.1656 \\
+DeepSeek & Conflict-aware & 36 & 26 & 0 & 18 & 0.2624 \\
+\midrule
+Qwen3.6 & Naive & 58 & 17 & 5 & 0 & 0.0001 \\
+Qwen3.6 & BPC & 48 & 22 & 10 & 0 & 0.0030 \\
+Qwen3.6 & Conflict-aware & 42 & 14 & 1 & 23 & 0.0003 \\
+\bottomrule
+\end{tabular}
+\caption{Model-level conclusions under different aggregation methods.}
+\label{tab:modellevel}
+\end{table}
+
+\subsection{Two-Judge Agreement Gives a Higher-Confidence Subset}
+
+Finally, Table~\ref{tab:routing} shows two-judge agreement routing. Requiring the two judges to agree on a non-uncertain winner increases accepted-set accuracy to 0.762, but coverage drops to 0.525. This supports the view that cross-judge agreement can serve as another useful confidence signal.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Route & Accuracy on accepted & Coverage & Accepted $n$ \\
+\midrule
+Naive two-judge agreement & 0.695 & 0.738 & 59 \\
+Conflict-aware two-judge agreement & 0.762 & 0.525 & 42 \\
+\bottomrule
+\end{tabular}
+\caption{Two-judge agreement routing. A winner is accepted only when both judges produce the same non-uncertain winner.}
+\label{tab:routing}
+\end{table}
+
+\section{Discussion}
+
+The results support a conservative interpretation. AB/BA does not eliminate position bias inside the judge. Instead, it reveals which examples are unstable under order intervention. When a pair changes winner after swapping order, the judgment should be treated as lower confidence rather than [collapsed into] a normal win/loss label.
+
+This distinction matters for model comparison. A fixed-order evaluation may produce apparently significant win-rate differences, but part of that signal may come from presentation order. Conflict-aware aggregation can reduce overconfident conclusions, as shown by DeepSeek, where the naive significant result disappears after conflict handling. At the same time, Qwen3.6 remains significant after filtering, showing that uncertainty-aware evaluation does not mechanically erase all model differences.
+
+The strongest practical recommendation is to report both reliability and coverage. A protocol that abstains on unstable examples may improve accuracy on accepted samples, but it should not be described as improving accuracy over the entire dataset. Instead, it provides a more conservative evaluation by separating [higher-confidence] and [lower-confidence] comparisons.
+
+\section{Limitations}
+
+This study has several limitations. First, it uses only one model pair, ChatGPT versus Vicuna-13B, from FairEval. Second, the dataset contains only 80 examples. Third, all judges are black-box APIs, so we cannot analyze internal mechanisms such as attention patterns, hidden states, or position representations. Fourth, conflict-aware accuracy is computed only on accepted samples and must always be interpreted together with coverage. Finally, the results are judge-dependent: DeepSeek and Qwen3.6 lead to different model-level significance after filtering.
+
+\section{Conclusion}
+
+This paper studies position bias in LLM-as-a-Judge through the lens of uncertainty. On FairEval, two black-box judges show substantial position-dependent behavior and AB/BA instability. FairEval-style score averaging does not consistently improve human agreement, while conflict-aware aggregation improves accepted-set reliability by abstaining on order-sensitive cases. Two-judge agreement further increases reliability at lower coverage. These findings suggest that AB/BA disagreement should be surfaced as an uncertainty signal rather than hidden through score averaging.
+
+\begin{thebibliography}{9}
+
+\bibitem{chiang2023vicuna}
+Wei-Lin Chiang, Zhuohan Li, Zi Lin, Ying Sheng, Zhanghao Wu, Hao Zhang, Lianmin Zheng, Siyuan Zhuang, Yonghao Zhuang, Joseph E. Gonzalez, Ion Stoica, and Eric P. Xing.
+\newblock Vicuna: An Open-Source Chatbot Impressing GPT-4 with 90\%* ChatGPT Quality.
+\newblock LMSYS Blog, 2023.
+\newblock \url{https://www.lmsys.org/blog/2023-03-30-vicuna/}
+
+\bibitem{geifman2017selective}
+Yonatan Geifman and Ran El-Yaniv.
+\newblock Selective Classification for Deep Neural Networks.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem{liu2023geval}
+Yang Liu, Dan Iter, Yichong Xu, Shuohang Wang, Ruochen Xu, and Chenguang Zhu.
+\newblock G-Eval: NLG Evaluation using GPT-4 with Better Human Alignment.
+\newblock In \emph{Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing}, 2023.
+
+\bibitem{wang2024faireval}
+Peiyi Wang, Lei Li, Liang Chen, Zefan Cai, Dawei Zhu, Binghuai Lin, Yunbo Cao, Lingpeng Kong, Qi Liu, Tianyu Liu, and Zhifang Sui.
+\newblock Large Language Models are not Fair Evaluators.
+\newblock In \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics}, 2024.
+
+\bibitem{zheng2023judging}
+Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica.
+\newblock Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\end{thebibliography}
+
+\end{document}

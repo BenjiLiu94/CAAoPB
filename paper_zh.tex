@@ -1,0 +1,250 @@
+\documentclass[11pt]{ctexart}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{将顺序敏感性视为不确定性：面向 LLM-as-a-Judge 位置偏置的冲突感知分析}
+\author{Zhibin Liu\\\texttt{benji94.liu@gamil.comm}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+LLM-as-a-Judge 已作为一种可扩展的开放式生成评测协议受到关注，但成对比较[对候选答案的展示顺序较为敏感]。已有的位置平衡方法，如同时评测 AB 与 BA 两种顺序并平均分数，可以在总体层面缓解顺序不平衡，但可能[掩盖单个样本中的矛盾判断]。本文研究一个更保守的问题：顺序交换后的判断分歧是否应被视为不确定性信号。我们基于 FairEval 官方设置，使用 ChatGPT 与 Vicuna-13B 的候选答案，并评测两个黑盒 judge：DeepSeek v4 flash 与 Qwen3.6-35B-A3B。实验表明，两个 judge 都存在较高的 AB/BA 翻转率和展示位置相关行为，但位置效应方向在不同顺序下并不完全一致。FairEval 风格的分数平均 BPC 并不能稳定提升与人类标注的一致性。相比之下，冲突感知聚合在 AB 与 BA 指向不同真实胜者时选择弃权，从而以降低覆盖率为代价提升保留样本上的准确率。进一步地，当要求两个 judge 都给出相同且非不确定的胜者时，保留样本准确率从 0.695 提升到 0.762，但覆盖率从 0.738 降低到 0.525。结果表明，AB/BA 比较不仅是位置校准机制，也可以作为检测不可靠判断的实用工具。
+\end{abstract}
+
+\section{引言}
+
+大语言模型正越来越多地被探索为自动评测器，以评估开放式生成任务中的回答质量。在 LLM-as-a-Judge 范式中，judge 模型会接收用户问题和一个或多个候选回答，并[被要求]输出评分或偏好判断。成对比较在这一研究方向中尤其常见，因为它避免了绝对分数标尺的设计问题，并能直接估计模型偏好 \cite{zheng2023judging,liu2023geval}。
+
+然而，成对比较存在一个基础可靠性问题：同一对答案在交换展示顺序后，judge 可能给出不同判断。理想情况下，如果答案 $X$ 在顺序 $(X,Y)$ 下优于答案 $Y$，那么在顺序 $(Y,X)$ 下，judge 仍应认为 $X$ 更优。已有研究表明，这种不变性经常不成立，从而[导致] LLM 评测中的位置偏置。
+
+一种常见缓解方法是同时评测 AB 与 BA 两种答案顺序，然后将分数映射回真实候选身份并进行聚合。这种方法通常称为 Balanced Position Calibration（BPC），简单且重要 \cite{wang2024faireval}。但分数平均可能掩盖另一个问题：如果 AB 认为候选 $X$ 获胜，而 BA 认为候选 $Y$ 获胜，那么该样本不只是普通噪声，而是对展示方式敏感。若仍将这类样本作为普通胜负证据计入模型比较，就可能[高估模型级结论背后的证据强度]。
+
+本文关注一个更窄的问题：AB/BA 分歧能否作为 LLM-as-a-Judge 的不确定性信号？我们并不声称消除 judge 模型内部的位置偏置，而是评估冲突感知聚合是否能够[显式暴露不稳定判断，并降低其对最终结论的影响]。
+
+本文贡献如下：
+\begin{itemize}
+    \item 我们在 FairEval 上使用 DeepSeek v4 flash 与 Qwen3.6-35B-A3B 两个黑盒 judge，复现了显著的顺序敏感性。
+    \item 我们比较了固定顺序 naive 评测、FairEval 风格 BPC，以及冲突感知 AB/BA 聚合。
+    \item 我们发现冲突感知聚合能够提升保留样本上的人类一致性，[同时明确付出覆盖率下降的代价]。
+    \item 我们进一步评估了双 judge 一致性路由，发现只有当两个 judge 都同意时，保留样本可靠性进一步提高。
+\end{itemize}
+
+\section{相关工作}
+
+\paragraph{LLM-as-a-Judge。}
+LLM-as-a-Judge 已被提出作为开放式回答的可扩展评测方法。在 MT-Bench 与 Chatbot Arena 中，Zheng 等人报告强 judge（如 GPT-4）与人类偏好的一致率超过 80\%，接近人类标注者之间的一致水平；同时他们也记录了位置偏置、冗长偏置和自我增强偏置等系统性问题 \cite{zheng2023judging}。G-Eval 也使用带有显式评价标准的 LLM 对生成文本进行评分，并在多个自然语言生成评测任务中表现出比早期自动指标更高的人类一致性 \cite{liu2023geval}。
+
+\paragraph{位置偏置与 FairEval。}
+FairEval 系统研究了 LLM 评测器中的公平性问题，并指出仅改变候选答案顺序就可能改变模型排名。该工作提出了 Multiple Evidence Calibration（MEC）、Balanced Position Calibration（BPC）和 Human-in-the-loop Calibration \cite{wang2024faireval}。本文沿用 FairEval 设置，并重点研究[如何解释] AB/BA 冲突。
+
+\paragraph{评测中的不确定性。}
+在自动标签可能存在噪声的情况下，弃权与不确定性估计是模型评测中的重要问题。Selective classification 将这一问题形式化为 risk--coverage tradeoff：系统可以对不确定样本弃权，以提高保留预测的可靠性 \cite{geifman2017selective}。本文将展示方式导致的判断分歧视为一种评测不确定性。这不同于[试图为每个样本强制给出]单一校准胜者的方法。
+
+\section{问题设定}
+
+每个样本包含一个问题 $q$、一个 ChatGPT 回答 $a_C$、一个 Vicuna-13B 回答 $a_V$，以及人类偏好标签 $y \in \{\text{ChatGPT}, \text{Vicuna}, \text{Tie}\}$。pairwise judge 在两种顺序下被查询：
+\[
+\text{AB}: (a_C, a_V), \qquad
+\text{BA}: (a_V, a_C).
+\]
+
+judge 输出第一个与第二个答案的评分。我们将每个顺序下的评分或胜者映射回真实候选身份。一个稳定的内容型 judge 应在 AB 与 BA 下偏好同一个真实候选。
+
+\section{方法}
+
+\subsection{Naive Pairwise Judge}
+
+naive baseline 只评测 AB 顺序，即 ChatGPT 在前，Vicuna-13B 在后。胜者由两个分数比较得到。由于候选身份与答案位置[完全混同]，该 baseline 容易受到第一位置偏好的影响。
+
+\subsection{FairEval 风格 BPC}
+
+BPC 同时评测 AB 与 BA。设 $s_C^{AB}$ 与 $s_V^{AB}$ 为 AB 顺序下映射回真实候选后的分数，$s_C^{BA}$ 与 $s_V^{BA}$ 为 BA 顺序下映射后的分数。FairEval 风格 BPC 计算：
+\[
+\bar{s}_C = \frac{s_C^{AB} + s_C^{BA}}{2}, \qquad
+\bar{s}_V = \frac{s_V^{AB} + s_V^{BA}}{2}.
+\]
+平均分更高的候选获胜；若相等则为平局。
+
+\subsection{冲突感知 AB/BA}
+
+我们定义一个基于胜者一致性的更严格聚合规则：
+\[
+g(w_{AB}, w_{BA}) =
+\begin{cases}
+w_{AB}, & \text{若 } w_{AB}=w_{BA},\\
+\text{Uncertain}, & \text{否则。}
+\end{cases}
+\]
+其中 $w_{AB}$ 和 $w_{BA}$ 是映射回 ChatGPT、Vicuna-13B 或 Tie 后的真实候选胜者。该规则将顺序交换后的分歧视为不确定性信号，[而不是通过平均将其抹平]。
+
+\subsection{双 Judge 一致性路由}
+
+我们进一步测试更严格的可靠性路由：只有当两个 judge 都通过冲突感知 AB/BA 给出相同且非不确定的胜者时，才接受最终胜者；否则将样本标为不确定。该实验用于检验跨 judge 一致性是否能够提供[更高置信度的样本子集]。
+
+\section{实验设置}
+
+\paragraph{数据集。}
+我们使用 FairEval 官方数据中的 ChatGPT 与 Vicuna-13B 比较 \cite{wang2024faireval,chiang2023vicuna}。数据集包含 80 个问题、对应候选回答和人类偏好标签。标签分布为：ChatGPT 胜 41 条，Vicuna-13B 胜 25 条，平局 14 条。
+
+\paragraph{Judge 模型。}
+我们使用两个 OpenAI-compatible 黑盒 judge API：
+\begin{itemize}
+    \item DeepSeek v4 flash，映射到供应商的 chat 模型。
+    \item Qwen3.6-35B-A3B。由于该供应商默认会返回 reasoning content 而非最终 answer content，我们关闭 thinking 模式。
+\end{itemize}
+
+\paragraph{Prompt 与解码设置。}
+我们采用 FairEval 风格 prompt：要求 judge 先给出 evaluation evidence，再输出两个评分行，分别对应两个 assistant。主实验使用 temperature 1.0。对于 Qwen3.6，我们设置 \texttt{enable\_thinking=false} 以获得标准 answer content。
+
+\paragraph{指标。}
+我们报告以下指标：
+\begin{itemize}
+    \item \textbf{First-position win rate}：在 AB 非平局判断中，第一个答案获胜的比例。
+    \item \textbf{Position flip rate}：AB 与 BA 指向不同真实胜者的样本比例。
+    \item \textbf{Human agreement}：与 FairEval 人类标签的一致率。
+    \item \textbf{Coverage}：未被标为 uncertain 的样本比例。
+    \item \textbf{Permutation-test p-value}：基于模型级胜负的双侧 paired sign-flip 检验。
+\end{itemize}
+
+\section{实验结果}
+
+\subsection{两个 Judge 均表现出位置敏感性}
+
+表~\ref{tab:position-zh} 显示，两个 judge 都对展示顺序敏感，但位置效应方向在不同顺序下并不完全一致。在 AB 顺序中，DeepSeek 在 66.7\% 的非平局判断中选择第一个答案，Qwen3.6 的比例达到 77.3\%。在 BA 顺序中，DeepSeek 只表现出较弱的第一位置倾向，而 Qwen3.6 更常选择第二位置。合并 AB 与 BA 两种顺序后，两个 judge 在非平局判断中选择第一位置的比例均为 60.0\%。[更关键的是，]交换答案顺序会分别导致 22.5\% 与 28.7\% 的样本改变真实胜者。
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Judge & AB first win & BA first win & Combined first win & Position flip \\
+\midrule
+DeepSeek v4 flash & 0.667 & 0.532 & 0.600 & 0.225 \\
+Qwen3.6-35B-A3B & 0.773 & 0.427 & 0.600 & 0.287 \\
+\bottomrule
+\end{tabular}
+\caption{FairEval AB/BA 评测下的位置敏感性。}
+\label{tab:position-zh}
+\end{table}
+
+这说明固定顺序评测会将候选质量与展示位置混合在一起。由于 naive AB 设置中 ChatGPT 总是在第一位，naive ChatGPT 胜率可能被 AB 顺序下的位置效应放大。
+
+\subsection{BPC 并不稳定提升人类一致性}
+
+表~\ref{tab:agreement-zh} 比较了与人类标签的一致性。FairEval 风格 BPC 并不稳定提升样本级准确率。对于 DeepSeek，BPC 准确率从 0.637 降至 0.613；对于 Qwen3.6，BPC 从 0.550 小幅提升到 0.562。这表明分数平均[可能在总体层面控制展示顺序，却不一定产生]更可靠的样本级标签。
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Judge & Naive acc. & BPC acc. & Conflict-aware acc. & Conflict-aware coverage \\
+\midrule
+DeepSeek v4 flash & 0.637 & 0.613 & 0.661 & 0.775 \\
+Qwen3.6-35B-A3B & 0.550 & 0.562 & 0.632 & 0.713 \\
+\bottomrule
+\end{tabular}
+\caption{人类一致性与覆盖率。Conflict-aware acc. 仅在非 uncertain 的保留样本上计算。}
+\label{tab:agreement-zh}
+\end{table}
+
+\subsection{冲突感知聚合提升保留样本可靠性}
+
+冲突感知 AB/BA 在两个 judge 上都提升了保留样本的准确率。DeepSeek 从 naive 的 0.637 提升到 0.661，覆盖率为 77.5\%；Qwen3.6 从 0.550 提升到 0.632，覆盖率为 71.3\%。这不是免费的准确率提升，而是一种 precision--coverage tradeoff：该方法通过[拒绝对顺序敏感样本强行判胜负]来提升保留判断的可靠性。
+
+被标为 uncertain 的样本确实更难。对于 Qwen3.6，uncertain 样本上的 naive 准确率仅为 0.348，而 accepted 样本上为 0.632。对于 DeepSeek，uncertain 样本上的 naive 准确率为 0.556，accepted 样本上为 0.661。因此，AB/BA 分歧[包含有效信息，而不仅是任意噪声]。
+
+\subsection{冲突处理会改变模型级结论}
+
+表~\ref{tab:modellevel-zh} 报告模型级胜负计数与 permutation test 的 p-value。naive AB 在两个 judge 上都给出显著偏向 ChatGPT 的结论。经过 conflict-aware 聚合后，DeepSeek 不再支持显著胜者（$p=0.2624$），而 Qwen3.6 仍然显著偏向 ChatGPT（$p=0.0003$）。这说明冲突处理后的模型级结论[仍可能受到 judge 选择的影响]。
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llrrrrr}
+\toprule
+Judge & Method & ChatGPT & Vicuna & Tie & Uncertain & $p$-value \\
+\midrule
+DeepSeek & Naive & 52 & 26 & 2 & 0 & 0.0047 \\
+DeepSeek & BPC & 44 & 31 & 5 & 0 & 0.1656 \\
+DeepSeek & Conflict-aware & 36 & 26 & 0 & 18 & 0.2624 \\
+\midrule
+Qwen3.6 & Naive & 58 & 17 & 5 & 0 & 0.0001 \\
+Qwen3.6 & BPC & 48 & 22 & 10 & 0 & 0.0030 \\
+Qwen3.6 & Conflict-aware & 42 & 14 & 1 & 23 & 0.0003 \\
+\bottomrule
+\end{tabular}
+\caption{不同聚合方法下的模型级结论。}
+\label{tab:modellevel-zh}
+\end{table}
+
+\subsection{双 Judge 一致性给出更高置信子集}
+
+表~\ref{tab:routing-zh} 展示双 judge 一致性路由。只有当两个 judge 都给出相同且非 uncertain 的胜者时才接受该样本。该策略将保留样本准确率提升到 0.762，但覆盖率降低到 0.525。这表明跨 judge 一致性[可以作为另一种]有用的置信信号。
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Route & Accuracy on accepted & Coverage & Accepted $n$ \\
+\midrule
+Naive two-judge agreement & 0.695 & 0.738 & 59 \\
+Conflict-aware two-judge agreement & 0.762 & 0.525 & 42 \\
+\bottomrule
+\end{tabular}
+\caption{双 judge 一致性路由。仅当两个 judge 给出相同且非 uncertain 的胜者时接受。}
+\label{tab:routing-zh}
+\end{table}
+
+\section{讨论}
+
+实验结果支持一个保守解释：AB/BA 并不能消除 judge 内部的位置偏置，而是揭示哪些样本在顺序干预下不稳定。当同一对回答在交换顺序后改变胜者时，该判断应被视为低置信，而不是被[压缩为]普通胜负标签。
+
+这种区别对模型比较很重要。固定顺序评测可能产生看似显著的胜率差异，但其中一部分信号可能来自展示位置。DeepSeek 的结果表明，冲突感知聚合可以削弱过度自信结论：naive 下显著的 ChatGPT 优势在冲突处理后不再显著。与此同时，Qwen3.6 在过滤后仍然显著偏向 ChatGPT，说明不确定性感知评测并不会机械地抹除所有模型差异。
+
+本文最重要的实践建议是同时报告可靠性与覆盖率。对不稳定样本弃权可以提升保留样本的准确率，但不应被描述为全数据集准确率提升。更准确地说，它通过区分[较高置信]与[较低置信]的比较，提供了更保守的评测结论。
+
+\section{局限性}
+
+本文存在若干局限。首先，实验只包含 FairEval 中 ChatGPT 与 Vicuna-13B 一个模型对。其次，数据规模仅为 80 条样本。第三，所有 judge 都是黑盒 API，因此无法分析注意力模式、隐藏状态或位置表示等内部机制。第四，conflict-aware accuracy 仅在保留样本上计算，必须与 coverage 一起解释。最后，结果依赖 judge 选择：DeepSeek 与 Qwen3.6 在冲突过滤后的模型级显著性结论并不完全一致。
+
+\section{结论}
+
+本文从不确定性角度研究 LLM-as-a-Judge 中的位置偏置。在 FairEval 上，两个黑盒 judge 都表现出显著的展示位置相关行为和 AB/BA 不稳定性。FairEval 风格的分数平均并不稳定提升人类一致性，而冲突感知聚合通过对顺序敏感样本弃权，提升了保留样本的可靠性。双 judge 一致性进一步提高了可靠性，但覆盖率更低。结果表明，AB/BA 分歧应作为不确定性信号被显式报告，而不是通过分数平均被隐藏。
+
+\begin{thebibliography}{9}
+
+\bibitem{chiang2023vicuna}
+Wei-Lin Chiang, Zhuohan Li, Zi Lin, Ying Sheng, Zhanghao Wu, Hao Zhang, Lianmin Zheng, Siyuan Zhuang, Yonghao Zhuang, Joseph E. Gonzalez, Ion Stoica, and Eric P. Xing.
+\newblock Vicuna: An Open-Source Chatbot Impressing GPT-4 with 90\%* ChatGPT Quality.
+\newblock LMSYS Blog, 2023.
+\newblock \url{https://www.lmsys.org/blog/2023-03-30-vicuna/}
+
+\bibitem{geifman2017selective}
+Yonatan Geifman and Ran El-Yaniv.
+\newblock Selective Classification for Deep Neural Networks.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem{liu2023geval}
+Yang Liu, Dan Iter, Yichong Xu, Shuohang Wang, Ruochen Xu, and Chenguang Zhu.
+\newblock G-Eval: NLG Evaluation using GPT-4 with Better Human Alignment.
+\newblock In \emph{Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing}, 2023.
+
+\bibitem{wang2024faireval}
+Peiyi Wang, Lei Li, Liang Chen, Zefan Cai, Dawei Zhu, Binghuai Lin, Yunbo Cao, Lingpeng Kong, Qi Liu, Tianyu Liu, and Zhifang Sui.
+\newblock Large Language Models are not Fair Evaluators.
+\newblock In \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics}, 2024.
+
+\bibitem{zheng2023judging}
+Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica.
+\newblock Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\end{thebibliography}
+
+\end{document}
