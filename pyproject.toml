@@ -1,0 +1,13 @@
+[project]
+name = "brflow"
+version = "0.1.0"
+description = "FairEval reproduction and robust LLM-as-a-Judge experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "tiktoken>=0.7.0",
+]
+
+[tool.uv]
+package = false
